@@ -14,7 +14,7 @@ router.post("/register", async (req, res) => {
         ]);
 
         if (user.rows.length > 0) {
-            return res.status(401).send("User already exists");
+            return res.status(401).json({ error: "Email is already registered" });
         }
 
         const saltRound = 10;
@@ -45,7 +45,7 @@ router.post("/login", async (req, res) => {
         ]);
 
         if (user.rows.length === 0) {
-            return res.status(401).json("Password or Email is incorrect");
+            return res.status(401).json({ error: "Password or Email is incorrect" });
         }
 
         const validPassword = await bcrypt.compare(
@@ -54,7 +54,7 @@ router.post("/login", async (req, res) => {
         );
 
         if (!validPassword) {
-            return res.status(401).json("Password or Email is incorrect");
+            return res.status(401).json({ error: "Password or Email is incorrect" });
         }
 
         const token = jwtGenerator(user.rows[0].user_id);

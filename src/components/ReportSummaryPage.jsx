@@ -12,6 +12,7 @@ import {
   Upload,
   Image as ImageIcon
 } from "lucide-react";
+import { Link } from "react-router-dom";
 
 import ReportUploader from "../components/ReportUploader";
 import LanguageSelector from "../components/LanguageSelector";
@@ -70,10 +71,10 @@ export default function ReportSummaryPage() {
     <div className="bg-gray-50 min-h-[100svh] font-inter text-gray-800">
       {/* Header */}
       <header className="bg-white shadow-sm py-3 px-6 sm:px-12 flex justify-between items-center sticky top-0 z-50">
-        <div className="flex items-center space-x-2">
+        <Link to="/" className="flex items-center space-x-2 cursor-pointer hover:opacity-80 transition-opacity">
           <Sparkle className="text-teal-500 w-8 h-8" />
           <span className="font-bold text-2xl text-gray-900">LucidCare</span>
-        </div>
+        </Link>
 
         <div className="relative">
           <button

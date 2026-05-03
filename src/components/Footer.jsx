@@ -1,14 +1,15 @@
 import { Sparkle, Mail, Phone, MapPin, Linkedin, Twitter, Facebook } from "lucide-react";
+import { Link } from "react-router-dom";
 
 export default function Footer() {
   return (
     <footer id="contact" className="bg-gray-800 text-gray-300 py-12 px-4 sm:px-8 lg:px-16">
       <div className="container mx-auto grid grid-cols-1 md:grid-cols-2 gap-8">
         <div className="space-y-4">
-          <div className="flex items-center space-x-2 text-white">
+          <Link to="/" className="flex items-center space-x-2 text-white hover:opacity-80 transition-opacity">
             <Sparkle className="w-8 h-8 text-teal-500" />
             <span className="font-bold text-2xl">LucidCare</span>
-          </div>
+          </Link>
           <p className="text-sm">
             AI-powered clinical summarization for functional medicine practices.
           </p>

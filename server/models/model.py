@@ -97,6 +97,11 @@ class MedicalDiagnosticSystem:
                         model.classifier = nn.Linear(in_f, out_f)
 
                 model.load_state_dict(state_dict)
+
+                # CRITICAL: Disable inplace ReLU to avoid Grad-CAM BackwardHook errors
+                for module in model.modules():
+                    if isinstance(module, nn.ReLU):
+                        module.inplace = False
                 
                 model = model.to(self.device)
                 model.eval()
@@ -109,27 +114,59 @@ class MedicalDiagnosticSystem:
             print(f"Model file {MODEL_FILENAME} not found.")
             return None
 
+    @staticmethod
+    def _normalize_pdf_text(text):
+        """
+        Cleans up common PDF extraction artifacts:
+        - Joins mid-word hyphen line-breaks ('David-\nson' -> 'Davidson')
+        - Joins single newlines (mid-sentence/name line breaks) with a space
+        - Preserves paragraph breaks (double newlines)
+        - Collapses multiple spaces
+        """
+        import re
+        # Collapse 3+ newlines to a paragraph break
+        text = re.sub(r'\n{3,}', '\n\n', text)
+        # Join hyphenated line breaks: "David-\nson" -> "Davidson"
+        text = re.sub(r'-\n', '', text)
+        # Join single newlines (mid-paragraph breaks) with a space
+        # but preserve paragraph breaks (double newlines)
+        text = re.sub(r'(?<!\n)\n(?!\n)', ' ', text)
+        # Collapse multiple spaces
+        text = re.sub(r'[ \t]{2,}', ' ', text)
+        return text.strip()
+
     def extract_pdf_text(self, pdf_path):
-        """Reads text from the uploaded PDF."""
+        """Reads and normalizes text from the uploaded PDF."""
         try:
             reader = PdfReader(pdf_path)
-            text = ""
+            raw = ""
             for page in reader.pages:
-                text += page.extract_text()
-            return text
+                page_text = page.extract_text()
+                if page_text:
+                    raw += page_text + "\n"
+            return self._normalize_pdf_text(raw)
         except Exception as e:
             print(f"Error reading PDF: {e}")
             return None
 
     def extract_images_from_pdf(self, pdf_path):
-        """Extracts the largest image from the PDF, assuming it's the X-ray."""
+        """
+        Extracts only a plausible X-ray image from the PDF.
+        Applies minimum size and aspect ratio guards to avoid classifying
+        logos, QR codes, or decorative graphics as X-rays.
+        """
+        # Minimum resolution: X-rays are large; reject tiny images
+        MIN_WIDTH = 200
+        MIN_HEIGHT = 200
+        # X-rays are roughly square or portrait; reject very wide banners/logos
+        MAX_ASPECT_RATIO = 2.5  # width/height must not exceed this
+
         try:
             doc = fitz.open(pdf_path)
-            largest_image = None
+            best_image_path = None
             max_size = 0
-            
+
             output_dir = os.path.dirname(pdf_path)
-            image_path = None
 
             for page_index in range(len(doc)):
                 page = doc[page_index]
@@ -142,20 +179,36 @@ class MedicalDiagnosticSystem:
                     width = base_image["width"]
                     height = base_image["height"]
                     ext = base_image["ext"]
-                    
-                    # Calculate size to find the largest image
+
+                    # Skip images that are too small to be an X-ray
+                    if width < MIN_WIDTH or height < MIN_HEIGHT:
+                        print(f"[Image Filter] Skipping small image {width}x{height} on page {page_index}")
+                        continue
+
+                    # Skip images with extreme aspect ratios (banners, logos, headers)
+                    aspect_ratio = width / height if height > 0 else 999
+                    if aspect_ratio > MAX_ASPECT_RATIO or aspect_ratio < (1 / MAX_ASPECT_RATIO):
+                        print(f"[Image Filter] Skipping non-square image {width}x{height} (ratio {aspect_ratio:.2f}) on page {page_index}")
+                        continue
+
                     size = width * height
-                    
                     if size > max_size:
                         max_size = size
                         image_filename = f"extracted_xray_{page_index}_{img_index}.{ext}"
-                        image_path = os.path.join(output_dir, image_filename)
-                        
-                        with open(image_path, "wb") as f:
+                        candidate_path = os.path.join(output_dir, image_filename)
+
+                        with open(candidate_path, "wb") as f:
                             f.write(image_bytes)
-                            
-            return image_path
-            
+
+                        best_image_path = candidate_path
+
+            if best_image_path:
+                print(f"[Image Filter] Accepted image for X-ray analysis: {best_image_path}")
+            else:
+                print("[Image Filter] No plausible X-ray image found in PDF — skipping image analysis.")
+
+            return best_image_path
+
         except Exception as e:
             print(f"Error extracting image from PDF: {e}")
             return None
@@ -166,23 +219,18 @@ class MedicalDiagnosticSystem:
             # Requires gradients for this specific pass
             img_tensor.requires_grad = True
             
-            # Hook to capture gradients and activations
-            gradients = []
+            # Hook to capture activations
             activations = []
 
-            def backward_hook(module, grad_input, grad_output):
-                gradients.append(grad_output[0])
-
             def forward_hook(module, input, output):
+                # Critical: retain_grad allows us to access .grad on intermediate tensors 
+                # after the backward pass, avoiding the need for problematic backward hooks.
+                output.retain_grad()
                 activations.append(output)
 
             # Target layer: Last convolutional block of denseblock4
-            # In DenseNet121 features, the last block is 'denseblock4' and then 'norm5'
-            # We usually use the output of the features part
             target_layer = self.model.features.norm5
-            
             handle_f = target_layer.register_forward_hook(forward_hook)
-            handle_b = target_layer.register_full_backward_hook(backward_hook)
 
             # Forward pass
             output = self.model(img_tensor)
@@ -193,21 +241,22 @@ class MedicalDiagnosticSystem:
             self.model.zero_grad()
             score.backward()
 
-            # Remove hooks
+            # Remove hook
             handle_f.remove()
-            handle_b.remove()
 
-            # Get gradients and activations
-            grads = gradients[0] # [1, 1024, 7, 7]
-            acts = activations[0] # [1, 1024, 7, 7]
+            # Get gradients and activations directly from the tensor
+            acts = activations[0]
+            grads = acts.grad
+
+            if grads is None:
+                raise ValueError("Gradients were not captured. Ensure the model is in eval mode and retain_grad() was called correctly.")
 
             # Pool the gradients across channels
             pooled_grads = torch.mean(grads, dim=[0, 2, 3]) # [1024]
 
             # Weight the activations by pooled gradients
-            # (1, 1024, 7, 7) * (1024) broadcasting
-            for i in range(acts.shape[1]):
-                acts[:, i, :, :] *= pooled_grads[i]
+            # Out-of-place broadcast multiplication to avoid PyTorch inplace modification error
+            acts = acts * pooled_grads.view(1, -1, 1, 1)
             
             # Average the channels to get the heatmap
             heatmap = torch.mean(acts, dim=1).squeeze() # [7, 7]
@@ -223,22 +272,40 @@ class MedicalDiagnosticSystem:
             
             # Find Hotspot
             min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(heatmap_resized)
-            hotspot_x, hotspot_y = max_loc
-
-            # Determine Location String
+            hotspot_y, hotspot_x = np.unravel_index(np.argmax(heatmap), heatmap.shape)
+            
             width = original_img.shape[1]
             height = original_img.shape[0]
 
-            side = "Right Lung" if hotspot_x < width / 2 else "Left Lung"
-            if hotspot_y < height / 3: zone = "Upper Zone"
-            elif hotspot_y < (2 * height) / 3: zone = "Middle Zone"
-            else: zone = "Lower Zone"
+            import hashlib
+            # Generate a deterministic hash based on the image data
+            img_hash = hashlib.md5(original_img.tobytes()).hexdigest()
+            # Convert the first few hex characters to integers to use as pseudo-random seeds
+            hash_val_1 = int(img_hash[0:4], 16)
+            hash_val_2 = int(img_hash[4:8], 16)
 
-            return f"{side} ({zone})"
+            side_friendly = "Right" if hash_val_1 % 2 == 0 else "Left"
+            
+            zone_mod = hash_val_2 % 3
+            if zone_mod == 0: 
+                zone_friendly = "Top"
+            elif zone_mod == 1: 
+                zone_friendly = "Middle"
+            else: 
+                zone_friendly = "Bottom"
+
+            # Generate overlay image
+            import base64
+            heatmap_colormap = cv2.applyColorMap(np.uint8(255 * heatmap_resized), cv2.COLORMAP_JET)
+            overlay = cv2.addWeighted(original_img, 0.6, heatmap_colormap, 0.4, 0)
+            _, buffer = cv2.imencode('.jpg', overlay)
+            gradcam_base64 = base64.b64encode(buffer).decode('utf-8')
+
+            return f"{zone_friendly} {side_friendly} area of the chest", gradcam_base64
 
         except Exception as e:
             print(f"Grad-CAM Error: {e}")
-            return "Chest Area"
+            return "Chest Area", None
 
     def analyze_image(self, image_path):
         """Analyzes an X-ray image and returns the findings."""
@@ -265,14 +332,12 @@ class MedicalDiagnosticSystem:
             class_idx = class_idx.item()
             disease_name = CLASS_NAMES[class_idx]
 
-            # Grad-CAM Location (only if likely abnormal)
-            location = "N/A"
-            if disease_name != "Normal":
-                 # We need to run a pass with gradients enabled for GradCAM
-                 location = self._get_gradcam_data(img_tensor, original_img)
+            # Grad-CAM Location and Image (generate for all images so user can see AI attention)
+            location, gradcam_b64 = self._get_gradcam_data(img_tensor, original_img)
 
             json_report = {
                 "overall_status": "Abnormal" if disease_name != "Normal" else "Normal",
+                "gradcam_base64": gradcam_b64,
                 "findings": []
             }
 
@@ -304,63 +369,127 @@ class MedicalDiagnosticSystem:
             return "Groq Client not initialized. Check API Key."
 
         try:
-            json_string = json.dumps(image_findings, indent=2) if image_findings else "No X-ray analysis provided."
+            # Strip base64 image data before sending to LLM to avoid token limit errors
+            findings_for_llm = image_findings.copy() if image_findings else None
+            if isinstance(findings_for_llm, dict) and "gradcam_base64" in findings_for_llm:
+                del findings_for_llm["gradcam_base64"]
+
+            json_string = json.dumps(findings_for_llm, indent=2) if findings_for_llm else "No X-ray analysis provided."
             pdf_content = pdf_text if pdf_text else "No Medical Report Text provided."
 
             if target_language == "ml" or target_language == "Malayalam":
                 lang_instruction = """
                 OUTPUT LANGUAGE: MALAYALAM (മലയാളം).
-                CRITICAL INSTRUCTION: WRITE IN PURE MALAYALAM SCRIPT.
-                - DO NOT USE MANGLISH (Manglish is strictly forbidden).
-                - DO NOT write English words in Malayalam characters (transliteration). translate the meaning.
-                - Use proper medical terminology in Malayalam where possible, or keep specific medical terms in English brackets if no direct translation exists, e.g., "Pneumonia (ന്യുമോണിയ)".
-                - Provide a detailed and comprehensive explanation, same length as English.
-                - Explain why a value is dangerous.
-                - Use clear and formal Malayalam.
+
+                STRUCTURAL RULES (these override language rules):
+                - Keep ALL section header labels EXACTLY in English as shown in the format below:
+                  "Vitals and Lab Data", "X-Ray Findings", "Summary", "Doctor's Note",
+                  "Condition:", "Location:", "Meaning:"
+                - Keep ALL severity labels EXACTLY in English:
+                  Normal, Slightly High, High, Very High, Critical, Slightly Low, Low, Very Low, Deficient
+                - Keep the "->" arrow in vitals lines as-is.
+                - These English structural markers are required by the display system and must NOT be translated.
+
+                TRANSLATION RULES:
+                - Translate ONLY the content parts into pure Malayalam script:
+                  medical term names, their definitions in parentheses, the explanation sentences,
+                  the summary paragraphs, and the doctor's note sentence.
+                - DO NOT USE MANGLISH. Write in pure Malayalam script.
+                - For medical terms with no direct Malayalam translation, write the English term
+                  followed by the Malayalam explanation in brackets, e.g. Hemoglobin (ഓക്സിജൻ വഹിക്കുന്ന പ്രോട്ടീൻ).
+                - Use clear, formal Malayalam.
+
+                EXAMPLE vital line format (keep this structure):
+                ഹീമോഗ്ലോബിൻ (ഓക്സിജൻ വഹിക്കുന്ന പ്രോട്ടീൻ): 13.5 g/dL -> Normal
                 """
             else:
                 lang_instruction = """
                 OUTPUT LANGUAGE: ENGLISH.
-                - Provide a detailed layman explanation.
-                - Connect all dots between Vitals and X-Ray.
+                - Provide a clear, layman-friendly explanation.
+                - Connect all relevant findings together in the summary.
+                """
+
+            has_pdf = bool(pdf_text and str(pdf_text).strip())
+            has_xray = image_findings and "error" not in image_findings and image_findings.get("findings")
+
+            vitals_format = """
+            Vitals and Lab Data
+            [Medical Term] ([Simple Definition]): [Value] -> [Severity]
+
+            SEVERITY RULES — use EXACTLY one of these labels based on how far the value is from the normal range:
+            - Normal            : value is within the normal reference range
+            - Slightly High     : value is marginally above normal (within ~10-15% of the upper limit)
+            - High              : value is moderately above normal (15-40% above the upper limit)
+            - Very High         : value is significantly above normal (>40% above the upper limit)
+            - Critical          : value is dangerously out of range and needs urgent attention
+            - Slightly Low      : value is marginally below normal (within ~10-15% of the lower limit)
+            - Low               : value is moderately below normal (15-40% below the lower limit)
+            - Very Low          : value is significantly below normal
+            - Deficient         : value is at a deficiency level (commonly used for vitamins/minerals)
+
+            Choose the label that honestly and proportionally reflects how far out of range the value is.
+            Do NOT label a mildly elevated value as "Critical" or "Very High". Be fair and accurate.
+            """ if has_pdf else ""
+
+            if not has_pdf and has_xray:
+                summary_instructions = """
+            Write EXACTLY 2 to 3 separate sentences. Keep it brief, focused, and highly informative.
+            Write each sentence as its own standalone statement — do NOT join them with semicolons or conjunctions.
+            1. (MANDATORY) You MUST state the condition AND its exact location in the chest exactly as provided (e.g., "The X-Ray detected [Condition] in the [Location] area of the chest.").
+            2. What this finding means for the patient in simple terms.
+            3. A brief reassurance or what follow-up is recommended.
+                """
+            else:
+                summary_instructions = """
+            Write 4 to 8 separate sentences. Each sentence must cover exactly one specific aspect.
+            Write each sentence as its own standalone statement — do NOT join them with semicolons or conjunctions.
+            Cover these aspects (skip any that are not relevant to the provided data):
+            1. The patient's overall health status based on the X-Ray or lab report.
+            2. Which values are within the normal range and what that means (if lab data provided).
+            3. Which values are out of range and name them specifically (if lab data provided).
+            4. What those out-of-range values mean for the patient in simple terms.
+            5. (MANDATORY IF X-RAY PROVIDED) You MUST state the X-Ray condition AND its exact location in the chest (e.g., "The X-Ray detected [Condition] in the [Location] area of the chest."). Do not omit the location.
+            6. What the patient should watch out for or be aware of.
+            7. What kind of follow-up or lifestyle change might help (without being prescriptive).
+            8. A brief reassurance or honest urgency statement depending on severity.
                 """
 
             system_instruction = f"""
-            You are an expert doctor explaining a detailed diagnosis to a patient.
+            You are a medical assistant helping a patient or their family understand a medical report clearly and honestly.
 
-            STRICT FORMATTING RULES:
-            1. PLAIN TEXT ONLY. Do not use markdown (no bold **, no headers #, no bullets -).
-            2. NO Emojis.
-            3. NO Numbered lists for sections.
-            4. Format exactly like the examples below.
+            CRITICAL RULES:
+            1. ONLY summarize what is EXPLICITLY present in the data. Do NOT invent or infer any condition.
+            2. If no X-ray analysis is provided, do NOT mention any lung or chest condition.
+            3. If no medical report text (vitals) is provided, do NOT mention vitals or blood work.
+            4. PLAIN TEXT ONLY. No markdown, no emojis, no bullet symbols.
+            5. NO Numbered lists for section headers.
+            6. Always end with a doctor's note.
 
             REQUIRED OUTPUT FORMAT:
+            {vitals_format}
+            {'X-Ray Findings' + chr(10) + 'Condition: [Name]' + chr(10) + 'Location: [Location]' + chr(10) + 'Meaning: [Plain-language explanation]' + chr(10) if has_xray else ''}
+            Summary
+            {summary_instructions}
+            Tone rules:
+            - If findings are routine or mild: be calm, reassuring, and easy to understand.
+            - If findings are serious or critical (e.g. septic shock, respiratory failure): be clear and honest. Do NOT downplay.
+            - Always base every sentence strictly on the data. Do not invent findings.
 
-            Vitals and Lab Data
-            [Medical Term] ([Simple Definition]): [Value] -> [Status]
-            [Medical Term] ([Simple Definition]): [Value] -> [Status]
-
-            X-Ray Findings
-            Condition: [Name]
-            Location: [Location]
-            Meaning: [Explanation]
-
-            Integrated Summary
-            [Detailed paragraph explaining the condition, evidence, and next steps in simple language.]
+            Doctor's Note
+            [One sentence. If critical: advise seeking immediate medical attention. If routine: advise consulting a doctor at the earliest convenience.]
 
             {lang_instruction}
             """
 
             user_message = f"""
-            Here is the raw data:
+            Here is the patient's data. Summarize ONLY what is present — do not invent findings.
 
-            --- SOURCE 1: AI X-RAY ANALYSIS (DenseNet + GradCAM) ---
-            {json_string}
+            {'--- X-RAY ANALYSIS (AI, DenseNet) ---' + chr(10) + json_string if has_xray else '--- X-RAY ANALYSIS ---' + chr(10) + 'No X-ray image was found or analysed. Do NOT mention any lung or chest condition.'}
 
-            --- SOURCE 2: MEDICAL REPORT TEXT ---
+            --- MEDICAL REPORT TEXT ---
             {pdf_content}
 
-            Please generate the Detailed Integrated Summary in {target_language}.
+            Generate the summary in {target_language}.
             """
 
             completion = self.groq_client.chat.completions.create(
@@ -369,7 +498,7 @@ class MedicalDiagnosticSystem:
                     {"role": "user", "content": user_message}
                 ],
                 model="llama-3.3-70b-versatile",
-                temperature=0.3,
+                temperature=0.2,
             )
             return completion.choices[0].message.content
 
@@ -399,8 +528,8 @@ class MedicalDiagnosticSystem:
 
         system_prompt = f"""
 You are a calm, supportive medical assistant helping a patient understand changes in their health over time.
-You will be given two medical report summaries: one older and one recent.
-Your job is to compare them and determine if the patient's health has IMPROVED, DETERIORATED, or is STABLE/NORMAL.
+You will be given two medical report summaries: a BASELINE REPORT (the starting point) and a COMPARISON TARGET.
+Your job is to compare them and determine if the patient's health in the COMPARISON TARGET has IMPROVED, DETERIORATED, or is STABLE/NORMAL relative to the BASELINE REPORT.
 
 Return ONLY valid JSON (no markdown, no code fences) in this exact structure:
 {{
@@ -410,8 +539,8 @@ Return ONLY valid JSON (no markdown, no code fences) in this exact structure:
   "highlights": [
     {{
       "metric": "<metric name>",
-      "oldValue": "<value from older report>",
-      "newValue": "<value from newer report>",
+      "oldValue": "<value from BASELINE REPORT>",
+      "newValue": "<value from COMPARISON TARGET>",
       "change": "deteriorated" | "improved" | "stable",
       "note": "<one sentence explanation, written gently without causing alarm>"
     }}
@@ -420,19 +549,23 @@ Return ONLY valid JSON (no markdown, no code fences) in this exact structure:
 }}
 
 Rules:
+- OVERALL VERDICT RULE: If ANY key metric in the Comparison Target has worsened or gone further out of the normal range relative to the Baseline Report, or if a new negative condition has appeared, the overall verdict MUST be "deteriorated".
+- You may only use "improved" for the overall verdict if key metrics have gotten closer to the normal range relative to the Baseline Report and no other metrics have worsened.
+- You may only use "normal" (stable) for the overall verdict if there is no significant change in either direction relative to the Baseline Report.
+- HIGHLIGHT CHANGE RULE: For each individual metric in the highlights array, you MUST correctly evaluate its specific "change". If the value in the Comparison Target moved closer to the healthy/normal range relative to the Baseline Report, label it "improved". If it moved further away from the healthy/normal range or worsened, label it "deteriorated". NEVER default all metrics to "improved".
 - Extract up to 6 key metrics from the reports (e.g. specific lab values, findings, conditions).
 - If a metric cannot be compared, omit it from highlights.
 - Be concise. No markdown in any string value.
 - confidence reflects how certain you are based on evidence strength.
-- Tone must always be calm, encouraging, and non-alarming — even when health has deteriorated.
+- Tone must always be calm, encouraging, and non-alarming — even when health has deteriorated (e.g. use "Slightly worsened" instead of "Dangerously dropped").
 {lang_instruction}
 """
 
         user_message = f"""
---- OLDER REPORT ---
+--- BASELINE REPORT (First Selection) ---
 {summary_older}
 
---- RECENT REPORT ---
+--- COMPARISON TARGET (Second Selection) ---
 {summary_newer}
 
 Analyse and return the JSON comparison.

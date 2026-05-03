@@ -1,14 +1,16 @@
 import { useState } from "react";
 import { Upload } from "lucide-react";
 
-export default function ReportUploader({ onFileSelect, label, accept, icon: Icon }) {
-  const [file, setFile] = useState(null);
+export default function ReportUploader({ onFileSelect, label, accept, icon: Icon, multiple = false }) {
+  const [files, setFiles] = useState([]);
 
   const handleChange = (e) => {
-    const selectedFile = e.target.files[0];
-    if (!selectedFile) return;
-    setFile(selectedFile);
-    onFileSelect(selectedFile);
+    const selectedFiles = Array.from(e.target.files);
+    if (selectedFiles.length === 0) return;
+    setFiles(selectedFiles);
+    
+    // Pass either the array of files (if multiple) or just the first file
+    onFileSelect(multiple ? selectedFiles : selectedFiles[0]);
   };
 
   return (
@@ -21,14 +23,16 @@ export default function ReportUploader({ onFileSelect, label, accept, icon: Icon
       <input
         type="file"
         accept={accept}
+        multiple={multiple}
         onChange={handleChange}
         className="w-full rounded-lg border border-gray-300 px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-500 focus:border-teal-500"
       />
 
-      {file && (
-        <p className="mt-2 text-xs text-gray-500 truncate">
-          Selected: {file.name}
-        </p>
+      {files.length > 0 && (
+        <div className="mt-2 text-xs text-gray-500">
+          <span className="font-semibold">Selected: </span>
+          {files.map(f => f.name).join(", ")}
+        </div>
       )}
     </div>
   );

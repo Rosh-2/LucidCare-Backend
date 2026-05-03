@@ -172,8 +172,9 @@ def get_summaries(current_user):
     try:
         response = (
             supabase.table('summaries')
-            .select("summary_id, summary_text, language")
+            .select("*")
             .eq('user_id', current_user)
+            # Remove the explicit order by created_at here to avoid crash if it doesn't exist, we will handle sorting on the frontend if needed.
             .execute()
         )
         return jsonify(response.data), 200
@@ -238,7 +239,7 @@ def compare_summaries(current_user):
         older_text = sorted_rows[0]['summary_text']
         newer_text = sorted_rows[-1]['summary_text']
 
-        target_language = sorted_rows[-1].get('language', 'English') or 'English'
+        target_language = body.get('language', 'English')
 
         result = diagnostic_system.generate_comparison(older_text, newer_text, target_language)
 
@@ -257,16 +258,18 @@ def compare_summaries(current_user):
 @app.route('/analyze', methods=['POST'])
 @token_required
 def analyze_medical_report(current_user):
-    if 'pdf' not in request.files:
-        return jsonify({'error': 'No PDF file part'}), 400
+    if 'pdf' not in request.files and 'image' not in request.files:
+        return jsonify({'error': 'No file part provided'}), 400
     
     pdf_file = request.files.get('pdf')
+    # X-ray image must be explicitly uploaded by the user — never guessed from PDF contents
+    xray_file = request.files.get('image')
 
     pdf_text = None
     image_findings = None
     
     try:
-        # Process PDF if uploaded
+        # Process PDF — extract text only, never auto-extract images
         if pdf_file and pdf_file.filename != '':
             filename = secure_filename(pdf_file.filename)
             filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
@@ -274,22 +277,18 @@ def analyze_medical_report(current_user):
             
             pdf_text = diagnostic_system.extract_pdf_text(filepath)
             
-            # Extract Image from PDF
-            extracted_image_path = diagnostic_system.extract_images_from_pdf(filepath)
-
-            if extracted_image_path:
-                 extract_img_filename = os.path.basename(extracted_image_path)
-                 print(f"Extracted Image: {extract_img_filename}")
-                 image_findings = diagnostic_system.analyze_image(extracted_image_path)
-                 
-                 # Clean up extracted image
-                 if os.path.exists(extracted_image_path):
-                     os.remove(extracted_image_path)
-            
             if os.path.exists(filepath):
                 os.remove(filepath)
 
-
+        # Process explicit X-ray upload only
+        if xray_file and xray_file.filename != '':
+            xray_filename = secure_filename(xray_file.filename)
+            xray_filepath = os.path.join(app.config['UPLOAD_FOLDER'], xray_filename)
+            xray_file.save(xray_filepath)
+            print(f"[X-Ray] User-uploaded image: {xray_filename}")
+            image_findings = diagnostic_system.analyze_image(xray_filepath)
+            if os.path.exists(xray_filepath):
+                os.remove(xray_filepath)
 
         # Generate Summary
         if not pdf_text and not image_findings:
@@ -301,15 +300,36 @@ def analyze_medical_report(current_user):
 
         # Store summary in Supabase
         try:
+            from datetime import datetime, timezone
             summary_data = {
                 "user_id": current_user,
                 "summary_text": summary,
-                "language": language
+                "language": language,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "xray_image": image_findings.get("gradcam_base64") if image_findings else None
             }
             supabase.table('summaries').insert(summary_data).execute()
         except Exception as e:
-            print(f"Error saving summary to Supabase: {e}")
-            # We continue even if saving fails, as the user still wants the result
+            print(f"Warning: Failed to save with full schema. Retrying without created_at/xray_image. Error: {e}")
+            try:
+                # Fallback if specific columns do not exist in user's DB schema
+                fallback_data = {
+                    "user_id": current_user,
+                    "summary_text": summary,
+                    "language": language
+                }
+                # Try adding xray_image to fallback too, just in case only created_at is missing
+                if image_findings and image_findings.get("gradcam_base64"):
+                    try:
+                        f2 = fallback_data.copy()
+                        f2["xray_image"] = image_findings.get("gradcam_base64")
+                        supabase.table('summaries').insert(f2).execute()
+                    except:
+                        supabase.table('summaries').insert(fallback_data).execute()
+                else:
+                    supabase.table('summaries').insert(fallback_data).execute()
+            except Exception as inner_e:
+                print(f"Error saving summary to Supabase: {inner_e}")
 
         return jsonify({
             'summary': summary,

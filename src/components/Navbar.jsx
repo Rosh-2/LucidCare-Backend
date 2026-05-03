@@ -7,7 +7,11 @@ export default function Navbar() {
 
   return (
     <nav className="fixed w-full z-50 top-0 bg-white bg-opacity-90 backdrop-blur-sm shadow-sm py-4 px-4 sm:px-8 lg:px-16 flex items-center justify-between">
-      <Link to="/" className="flex items-center space-x-2">
+      <Link 
+        to="/" 
+        className="flex items-center space-x-2"
+        onClick={() => setIsMobileMenuOpen(false)}
+      >
         <Sparkle className="text-teal-500 w-8 h-8" />
         <span className="font-bold text-2xl text-gray-900">LucidCare</span>
       </Link>

@@ -4,14 +4,17 @@ import { useNavigate } from "react-router-dom";
 
 export default function Login() {
   const [credentials, setCredentials] = useState({ email: "", password: "" });
+  const [error, setError] = useState("");
   const navigate = useNavigate();
 
   const handleChange = (e) => {
     setCredentials({ ...credentials, [e.target.name]: e.target.value });
+    setError(""); // Clear error when user types
   };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    setError("");
     try {
       const response = await fetch("http://localhost:5000/auth/login", {
         method: "POST",
@@ -23,14 +26,13 @@ export default function Login() {
 
       if (response.ok) {
         localStorage.setItem("token", parseRes.token);
-        console.log("Login Successful");
         window.location.href = "/dashboard";
       } else {
-        console.error(parseRes);
-        alert(parseRes || "Login failed");
+        setError(parseRes.error || "Login failed");
       }
     } catch (err) {
       console.error(err.message);
+      setError("An error occurred during login");
     }
   };
 
@@ -45,7 +47,7 @@ export default function Login() {
       onClick={handleBackdropClick}
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm px-4 pt-20"
     >
-      <div className="bg-white rounded-2xl shadow-2xl p-8 w-full max-w-md animate-fade-in-up relative" onClick={(e) => e.stopPropagation()}>
+      <div className="bg-white rounded-2xl shadow-2xl p-8 w-full max-w-md animate-fade-in-up relative max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
 
         <button
           onClick={() => navigate("/")}
@@ -57,6 +59,13 @@ export default function Login() {
         <h2 className="text-3xl font-bold text-gray-900 mb-6 text-center">
           Login to Your Account
         </h2>
+
+        {error && (
+          <div className="mb-4 p-3 bg-red-50 border border-red-200 text-red-600 text-sm rounded-lg text-center animate-pulse">
+            {error}
+          </div>
+        )}
+
         <form onSubmit={handleSubmit} className="space-y-5">
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>

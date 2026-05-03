@@ -13,17 +13,20 @@ export default function Signup() {
     password: ""
   });
 
+  const [error, setError] = useState("");
   const { name, age, sex, email, password } = inputs;
 
   const handleChange = (e) => {
     setInputs({ ...inputs, [e.target.name]: e.target.value });
+    setError(""); // Clear error when user types
   };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    setError("");
     try {
       if (sex === "Select") {
-        alert("Please select a valid sex");
+        setError("Please select a valid sex");
         return;
       }
 
@@ -40,10 +43,11 @@ export default function Signup() {
         localStorage.setItem("token", parseRes.token);
         window.location.href = "/dashboard";
       } else {
-        alert(parseRes || "Signup failed");
+        setError(parseRes.error || "Signup failed");
       }
     } catch (err) {
       console.error(err.message);
+      setError("An error occurred during signup");
     }
   };
 
@@ -58,7 +62,7 @@ export default function Signup() {
       onClick={handleBackdropClick}
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm px-4"
     >
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-8 animate-fade-in-up relative">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-8 animate-fade-in-up relative max-h-[90vh] overflow-y-auto">
 
         <button
           onClick={() => navigate("/")}
@@ -70,6 +74,12 @@ export default function Signup() {
         <h2 className="text-2xl font-bold text-gray-900 mb-6 text-center">
           Create Your Account
         </h2>
+
+        {error && (
+          <div className="mb-4 p-3 bg-red-50 border border-red-200 text-red-600 text-sm rounded-lg text-center animate-pulse">
+            {error}
+          </div>
+        )}
 
         <form className="space-y-4" onSubmit={handleSubmit}>
           <div>

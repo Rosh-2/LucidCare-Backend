@@ -1,6 +1,6 @@
 // src/pages/ReportSummaryPage.jsx
 import { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, Link } from "react-router-dom";
 import {
   Sparkle,
   Menu,
@@ -10,6 +10,7 @@ import {
   FileText,
   AlertCircle,
   Upload,
+  Image as ImageIcon,
   GitCompare,
   History,
 } from "lucide-react";
@@ -19,11 +20,13 @@ import LanguageSelector from "../components/LanguageSelector";
 import SummaryGenerator from "../components/SummaryGenerator";
 import SummaryHistorySidebar from "../components/SummaryHistorySidebar";
 import ComparativeAnalysisPanel from "../components/ComparativeAnalysisPanel";
+import SummaryDisplay from "../components/SummaryDisplay";
 
 export default function ReportSummaryPage() {
-  const [pdfFile, setPdfFile] = useState(null);
+  const [uploadedFiles, setUploadedFiles] = useState([]);
   const [language, setLanguage] = useState("en");
   const [summary, setSummary] = useState("");
+  const [gradcamImg, setGradcamImg] = useState(null);
   const [loading, setLoading] = useState(false);
 
   // Profile dropdown
@@ -36,6 +39,9 @@ export default function ReportSummaryPage() {
   const [compareMode, setCompareMode] = useState(false);
   const [selectedSummaries, setSelectedSummaries] = useState([]);
 
+  // Track if summary was loaded from history (for the badge)
+  const [fromHistory, setFromHistory] = useState(false);
+
   const navigate = useNavigate();
 
   const handleLogout = () => {
@@ -44,13 +50,19 @@ export default function ReportSummaryPage() {
   };
 
   const handleGenerate = async () => {
-    if (!pdfFile) {
-      return alert("Please upload a Medical Report (PDF).");
+    if (!uploadedFiles || uploadedFiles.length === 0) {
+      return alert("Please upload a Medical Report (PDF) or an X-Ray Image.");
     }
     setLoading(true);
 
     const formData = new FormData();
-    if (pdfFile) formData.append("pdf", pdfFile);
+    for (const file of uploadedFiles) {
+      if (file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf")) {
+        formData.append("pdf", file);
+      } else if (file.type.startsWith("image/") || file.name.toLowerCase().match(/\.(png|jpe?g)$/)) {
+        formData.append("image", file);
+      }
+    }
     formData.append("language", language);
 
     try {
@@ -66,6 +78,11 @@ export default function ReportSummaryPage() {
 
       if (response.ok) {
         setSummary(data.summary);
+        if (data.details && data.details.gradcam_base64) {
+          setGradcamImg(data.details.gradcam_base64);
+        } else {
+          setGradcamImg(null);
+        }
       } else {
         alert(data.error || "Analysis failed");
       }
@@ -87,6 +104,13 @@ export default function ReportSummaryPage() {
     setSelectedSummaries([]);
   }
 
+  function handleViewHistory(summaryText, gradcamBase64) {
+    setSummary(summaryText);
+    setGradcamImg(gradcamBase64 || null);
+    setFromHistory(true);
+    setCompareMode(false);
+  }
+
   return (
     <div className="bg-gray-50 min-h-[100svh] font-inter text-gray-800">
       {/* Sidebar */}
@@ -94,6 +118,7 @@ export default function ReportSummaryPage() {
         isOpen={isSidebarOpen}
         onClose={() => setIsSidebarOpen(false)}
         onCompare={handleCompare}
+        onView={handleViewHistory}
       />
 
       {/* Header */}
@@ -111,10 +136,10 @@ export default function ReportSummaryPage() {
             <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-teal-400 rounded-full ring-2 ring-white" />
           </button>
 
-          <div className="flex items-center space-x-2">
+          <Link to="/" className="flex items-center space-x-2 cursor-pointer hover:opacity-80 transition-opacity">
             <Sparkle className="text-teal-500 w-7 h-7" />
             <span className="font-bold text-xl text-gray-900">LucidCare</span>
-          </div>
+          </Link>
         </div>
 
         <div className="flex items-center gap-3">
@@ -188,10 +213,11 @@ export default function ReportSummaryPage() {
                 </h2>
                 <div className="space-y-8">
                   <ReportUploader
-                    label="Upload Medical Report (PDF)"
-                    accept=".pdf"
+                    label="Upload Report (PDF) and/or X-Ray (Image)"
+                    accept=".pdf, image/*"
                     icon={Upload}
-                    onFileSelect={setPdfFile}
+                    multiple={true}
+                    onFileSelect={setUploadedFiles}
                   />
                   <LanguageSelector
                     language={language}
@@ -244,11 +270,26 @@ export default function ReportSummaryPage() {
                   <h2 className="text-lg font-bold text-gray-900 flex items-center gap-2">
                     <Sparkle size={18} className="text-teal-500" /> Report Summary
                   </h2>
-                  {summary && (
-                    <span className="bg-green-100 text-green-700 text-xs px-3 py-1 rounded-full font-bold uppercase tracking-wider">
-                      Ready
-                    </span>
-                  )}
+                  <div className="flex items-center gap-2">
+                    {summary && fromHistory && (
+                      <>
+                        <span className="bg-violet-100 text-violet-700 text-xs px-3 py-1 rounded-full font-bold uppercase tracking-wider flex items-center gap-1">
+                          <History size={11} /> From History
+                        </span>
+                        <button
+                          onClick={() => { setSummary(""); setFromHistory(false); }}
+                          className="text-xs text-gray-400 hover:text-gray-600 underline underline-offset-2 transition"
+                        >
+                          Clear
+                        </button>
+                      </>
+                    )}
+                    {summary && !fromHistory && (
+                      <span className="bg-green-100 text-green-700 text-xs px-3 py-1 rounded-full font-bold uppercase tracking-wider">
+                        Ready
+                      </span>
+                    )}
+                  </div>
                 </div>
 
                 {/* Card Body */}
@@ -285,19 +326,7 @@ export default function ReportSummaryPage() {
                   )}
 
                   {!loading && summary && (
-                    <div className="h-full overflow-y-auto p-8 lg:p-10">
-                      <div className="text-gray-700 text-base leading-8 whitespace-pre-wrap">
-                        {summary}
-                      </div>
-                      <div className="mt-12 pt-6 border-t border-gray-100 flex items-start gap-3">
-                        <AlertCircle size={18} className="text-gray-400 mt-0.5" />
-                        <p className="text-xs text-gray-400 italic leading-relaxed">
-                          Disclaimer: This summary is generated by AI for
-                          informational purposes only. Always consult a qualified
-                          healthcare professional for medical advice.
-                        </p>
-                      </div>
-                    </div>
+                    <SummaryDisplay summary={summary} gradcamImg={gradcamImg} />
                   )}
                 </div>
               </div>

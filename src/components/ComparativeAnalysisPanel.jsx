@@ -25,7 +25,7 @@ function formatDate(isoString) {
 }
 
 // ─── Real API call ────────────────────────────────────────────────────────────
-async function callCompareAPI(summaries) {
+async function callCompareAPI(summaries, language) {
     const token = localStorage.getItem("token");
     const res = await fetch("http://localhost:5000/compare", {
         method: "POST",
@@ -35,6 +35,7 @@ async function callCompareAPI(summaries) {
         },
         body: JSON.stringify({
             summaries: summaries.map((s) => ({ id: s.id, fullText: s.fullText })),
+            language: language,
         }),
     });
     const data = await res.json();
@@ -111,7 +112,7 @@ function VerdictBanner({ verdict, confidence }) {
 
 function SummaryCard({ summary, index }) {
     const [expanded, setExpanded] = useState(false);
-    const labels = ["Earlier Report", "Later Report", "Report 3", "Report 4"];
+    const labels = ["Baseline Report (First Selected)", "Comparison Target (Second Selected)", "Report 3", "Report 4"];
 
     return (
         <div className="border border-gray-200 rounded-xl overflow-hidden">
@@ -152,13 +153,15 @@ export default function ComparativeAnalysisPanel({ summaries, onClose }) {
     const [analysisResult, setAnalysisResult] = useState(null);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState(null);
+    const [language, setLanguage] = useState("en");
 
     async function handleAnalyze() {
         setLoading(true);
         setError(null);
         setAnalysisResult(null);
         try {
-            const result = await callCompareAPI(summaries);
+            const targetLangStr = language === "ml" ? "Malayalam" : "English";
+            const result = await callCompareAPI(summaries, targetLangStr);
             setAnalysisResult(result);
         } catch (e) {
             setError(e.message || "Failed to run analysis. Please try again.");
@@ -167,10 +170,8 @@ export default function ComparativeAnalysisPanel({ summaries, onClose }) {
         }
     }
 
-    // Sort oldest first
-    const sorted = [...summaries].sort(
-        (a, b) => new Date(a.date) - new Date(b.date)
-    );
+    // Use the exact order provided by the user's selection sequence
+    const sorted = summaries;
 
     return (
         <div className="bg-white rounded-2xl shadow-sm border border-gray-200 flex flex-col overflow-hidden h-full">
@@ -205,28 +206,46 @@ export default function ComparativeAnalysisPanel({ summaries, onClose }) {
                     </div>
                 </div>
 
-                {/* Analyze Button */}
+                {/* Analyze Controls */}
                 {!analysisResult && (
-                    <button
-                        onClick={handleAnalyze}
-                        disabled={loading}
-                        className={`w-full flex items-center justify-center gap-2 py-3.5 rounded-xl font-semibold text-sm transition shadow-sm ${loading
-                            ? "bg-teal-400 text-white cursor-not-allowed"
-                            : "bg-teal-600 hover:bg-teal-700 text-white"
-                            }`}
-                    >
-                        {loading ? (
-                            <>
-                                <Loader2 size={17} className="animate-spin" />
-                                Analyzing with AI...
-                            </>
-                        ) : (
-                            <>
-                                <GitCompare size={17} />
-                                Run Comparative Analysis
-                            </>
-                        )}
-                    </button>
+                    <div className="flex flex-col gap-3">
+                        <div className="flex items-center gap-2">
+                            <span className="text-sm font-semibold text-gray-700 whitespace-nowrap">Output Language:</span>
+                            <div className="relative flex-1">
+                                <select
+                                    value={language}
+                                    onChange={(e) => setLanguage(e.target.value)}
+                                    className="w-full appearance-none bg-white border border-gray-200 text-gray-700 py-2 pl-3 pr-8 rounded-lg text-sm font-medium focus:outline-none focus:ring-2 focus:ring-teal-500/50"
+                                >
+                                    <option value="en">English</option>
+                                    <option value="ml">Malayalam</option>
+                                </select>
+                                <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-2 text-gray-400">
+                                    <ChevronDown size={14} />
+                                </div>
+                            </div>
+                        </div>
+                        <button
+                            onClick={handleAnalyze}
+                            disabled={loading}
+                            className={`w-full flex items-center justify-center gap-2 py-3.5 rounded-xl font-semibold text-sm transition shadow-sm ${loading
+                                ? "bg-teal-400 text-white cursor-not-allowed"
+                                : "bg-teal-600 hover:bg-teal-700 text-white"
+                                }`}
+                        >
+                            {loading ? (
+                                <>
+                                    <Loader2 size={17} className="animate-spin" />
+                                    Analyzing with AI...
+                                </>
+                            ) : (
+                                <>
+                                    <GitCompare size={17} />
+                                    Run Comparative Analysis
+                                </>
+                            )}
+                        </button>
+                    </div>
                 )}
 
                 {/* Error */}

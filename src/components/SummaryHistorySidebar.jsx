@@ -10,6 +10,7 @@ import {
     ChevronDown,
     ChevronRight,
     AlertTriangle,
+    AlertCircle,
     Loader2,
     RefreshCw,
 } from "lucide-react";
@@ -58,7 +59,7 @@ function groupByDate(summaries) {
 }
 
 // ─── SummaryHistorySidebar ────────────────────────────────────────────────────
-export default function SummaryHistorySidebar({ isOpen, onClose, onCompare }) {
+export default function SummaryHistorySidebar({ isOpen, onClose, onCompare, onView }) {
     const [summaries, setSummaries] = useState([]);
     const [fetchStatus, setFetchStatus] = useState("idle"); // idle | loading | done | error
     const [selected, setSelected] = useState([]);
@@ -77,10 +78,22 @@ export default function SummaryHistorySidebar({ isOpen, onClose, onCompare }) {
             });
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             const data = await res.json();
-            setSummaries(data);
+            
+            // Safety: Ensure we always have an array
+            const summaryArray = Array.isArray(data) ? data : [];
+
+            // Sort by created_at descending (newest first), falling back to 0 if missing
+            summaryArray.sort((a, b) => {
+                const dateA = a.created_at ? new Date(a.created_at).getTime() : 0;
+                const dateB = b.created_at ? new Date(b.created_at).getTime() : 0;
+                return dateB - dateA;
+            });
+
+            setSummaries(summaryArray);
             setFetchStatus("done");
         } catch (e) {
             console.error("Failed to fetch summaries:", e);
+            setSummaries([]);
             setFetchStatus("error");
         }
     }, []);
@@ -116,23 +129,38 @@ export default function SummaryHistorySidebar({ isOpen, onClose, onCompare }) {
     }
 
     function handleCompare() {
-        if (selected.length < 2) return;
-        const chosen = summaries
-            .filter((s) => selected.includes(s.summary_id))
-            .map((s) => ({
+        if (!canCompare) return;
+        const chosen = selected.map(id => {
+            const s = summaries.find(x => x.summary_id === id);
+            if (!s) return null;
+            return {
                 id: s.summary_id,
                 title: deriveTitle(s.summary_text),
                 date: s.created_at,
                 language: s.language,
                 preview: derivePreview(s.summary_text),
                 fullText: s.summary_text,
-            }));
+            };
+        }).filter(Boolean);
         onCompare(chosen);
         onClose();
     }
 
+    function handleView(summary) {
+        if (onView) onView(summary.summary_text, summary.xray_image);
+        onClose();
+    }
+
+    // Identify if selected items are of different types (X-Ray vs PDF Report)
+    const safeSummaries = Array.isArray(summaries) ? summaries : [];
+    const selectedSummaries = safeSummaries.filter(s => selected.includes(s.summary_id));
+    const hasXrayItems = selectedSummaries.some(s => !!s.xray_image);
+    const hasPdfItems = selectedSummaries.some(s => !s.xray_image);
+    const isTypeMismatch = hasXrayItems && hasPdfItems;
+    const canCompare = selected.length >= 2 && !isTypeMismatch;
+
     // ── Derived data ──────────────────────────────────────────────────────────
-    const grouped = groupByDate(summaries);
+    const grouped = groupByDate(safeSummaries);
 
     // ── Render ────────────────────────────────────────────────────────────────
     return (
@@ -192,8 +220,8 @@ export default function SummaryHistorySidebar({ isOpen, onClose, onCompare }) {
                             </button>
                             <button
                                 onClick={handleCompare}
-                                disabled={selected.length < 2}
-                                className={`flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-full transition ${selected.length >= 2
+                                disabled={!canCompare}
+                                className={`flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-full transition ${canCompare
                                     ? "bg-teal-600 text-white hover:bg-teal-700 shadow-sm"
                                     : "bg-gray-200 text-gray-400 cursor-not-allowed"
                                     }`}
@@ -211,6 +239,16 @@ export default function SummaryHistorySidebar({ isOpen, onClose, onCompare }) {
                         <AlertTriangle size={14} className="text-amber-500 mt-0.5 flex-shrink-0" />
                         <p className="text-xs text-amber-700 leading-relaxed">
                             Select 2 or more summaries to run a comparative analysis.
+                        </p>
+                    </div>
+                )}
+
+                {/* Mismatch warning */}
+                {isTypeMismatch && (
+                    <div className="px-5 py-2.5 bg-red-50 border-b border-red-100 flex items-start gap-2">
+                        <AlertCircle size={14} className="text-red-500 mt-0.5 flex-shrink-0" />
+                        <p className="text-xs text-red-700 leading-relaxed font-medium">
+                            Cannot compare an X-Ray with a PDF Report. Please select items of the same type.
                         </p>
                     </div>
                 )}
@@ -278,14 +316,19 @@ export default function SummaryHistorySidebar({ isOpen, onClose, onCompare }) {
                                         return (
                                             <div
                                                 key={summary.summary_id}
-                                                onClick={() => toggleSelect(summary.summary_id)}
-                                                className={`flex items-start gap-3 px-5 py-3.5 cursor-pointer transition group border-l-2 ${isChecked
-                                                    ? "border-teal-400 bg-teal-50/60"
-                                                    : "border-transparent hover:bg-gray-50"
-                                                    }`}
+                                                onClick={() => handleView(summary)}
+                                                className={`flex items-start gap-3 px-5 py-3.5 cursor-pointer transition group border-l-2 ${
+                                                    isChecked
+                                                        ? "border-teal-400 bg-teal-50/60"
+                                                        : "border-transparent hover:bg-gray-50"
+                                                }`}
                                             >
-                                                {/* Checkbox */}
-                                                <div className="mt-0.5 flex-shrink-0">
+                                                {/* Checkbox — click stops propagation so it doesn't trigger view */}
+                                                <div
+                                                    className="mt-0.5 flex-shrink-0"
+                                                    onClick={(e) => { e.stopPropagation(); toggleSelect(summary.summary_id); }}
+                                                    title={isChecked ? "Deselect for comparison" : "Select for comparison"}
+                                                >
                                                     {isChecked ? (
                                                         <CheckSquare size={17} className="text-teal-500" />
                                                     ) : (
@@ -317,6 +360,11 @@ export default function SummaryHistorySidebar({ isOpen, onClose, onCompare }) {
                                                             </span>
                                                         )}
                                                     </p>
+                                                </div>
+
+                                                {/* View hint */}
+                                                <div className="flex-shrink-0 opacity-0 group-hover:opacity-100 transition mt-0.5">
+                                                    <span className="text-[10px] text-teal-500 font-semibold">View →</span>
                                                 </div>
                                             </div>
                                         );
