@@ -1,0 +1,17 @@
+Flask
+python-dotenv
+flask-cors
+PyJWT
+bcrypt
+supabase
+httpx>=0.28.1
+websockets>=13.0
+ultralytics
+torch
+torchvision
+groq
+PyPDF2
+opencv-python
+numpy
+Pillow
+pymupdf
