@@ -28,7 +28,7 @@ Delivers illustrated, plain-language explanations to help patients understand th
 
 ## 🛠 Technologies Used
 - **Vision AI:** YOLOv8  
-- **LLM:** Gemini 1.5 Pro  
+- **LLM:** Groq 
 - **Rule Engine:** Custom Python engine with **NumPy**, **Pandas**, and **Scikit-learn**
 
 ---
